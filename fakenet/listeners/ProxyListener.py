@@ -1,16 +1,18 @@
+# Copyright (C) 2016-2023 Mandiant, Inc. All rights reserved.
+
 import socket
-import SocketServer
+import socketserver
 import threading
 import sys
 import glob
 import time
 import importlib
-import Queue
+import queue
 import select
 import logging
 import ssl
 from OpenSSL import SSL
-from ssl_utils import ssl_detector
+from .ssl_utils import ssl_detector
 from . import *
 import os
 
@@ -38,7 +40,7 @@ class ProxyListener(object):
         self.logger.debug('Starting...')
 
         self.logger.debug('Initialized with config:')
-        for key, value in config.iteritems():
+        for key, value in config.items():
             self.logger.debug('  %10s: %s', key, value)
 
     def start(self):
@@ -96,6 +98,9 @@ class ProxyListener(object):
     def acceptDiverter(self, diverter):
         self.server.diverter = diverter
 
+    def acceptDiverterListenerCallbacks(self, diverterListenerCallbacks):
+        self.server.diverterListenerCallbacks = diverterListenerCallbacks
+
 class ThreadedTCPClientSocket(threading.Thread):
 
 
@@ -110,10 +115,20 @@ class ThreadedTCPClientSocket(threading.Thread):
         self.logger = log
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
+    def connect(self):
+        try:
+            self.sock.connect((self.ip, self.port))
+            new_sport = self.sock.getsockname()[1]
+            return new_sport
+
+        except Exception as e:
+            self.logger.debug('Listener socket exception while attempting connection %s' % e.message)
+
+        return None
+
     def run(self):
 
         try:
-            self.sock.connect((self.ip, self.port))
             while True:
                 readable, writable, exceptional = select.select([self.sock],
                         [], [], .001)
@@ -130,10 +145,10 @@ class ThreadedTCPClientSocket(threading.Thread):
         except Exception as e:
             self.logger.debug('Listener socket exception %s' % e.message)
 
-class ThreadedTCPServer(SocketServer.ThreadingMixIn, SocketServer.TCPServer):
+class ThreadedTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
     daemon_threads = True
 
-class ThreadedUDPServer(SocketServer.ThreadingMixIn, SocketServer.UDPServer):
+class ThreadedUDPServer(socketserver.ThreadingMixIn, socketserver.UDPServer):
     daemon_threads = True
 
 def get_top_listener(config, data, listeners, diverter, orig_src_ip,
@@ -157,16 +172,16 @@ def get_top_listener(config, data, listeners, diverter, orig_src_ip,
     
     return top_listener
 
-class ThreadedTCPRequestHandler(SocketServer.BaseRequestHandler):
+class ThreadedTCPRequestHandler(socketserver.BaseRequestHandler):
 
     
     def handle(self):
 
         remote_sock = self.request
         # queue for data received from the listener
-        listener_q = Queue.Queue()
+        listener_q = queue.Queue()
         # queue for data received from remote
-        remote_q = Queue.Queue()
+        remote_q = queue.Queue()
         data = None
 
         ssl_remote_sock = None
@@ -196,10 +211,16 @@ class ThreadedTCPRequestHandler(SocketServer.BaseRequestHandler):
 
         except Exception as e:
             self.server.logger.warning('recv() error: %s' % e.message)
+        
+        # Is the pkt ssl encrypted?
+        # Using a str here instead of bool to match the format returned by
+        # configs of other listeners
+        is_ssl_encrypted = 'No'
 
         if data:
 
             if ssl_detector.looks_like_ssl(data):
+                is_ssl_encrypted = 'Yes'
                 self.server.logger.debug('SSL detected')
                 ssl_remote_sock = ssl.wrap_socket(
                         remote_sock, 
@@ -223,6 +244,13 @@ class ThreadedTCPRequestHandler(SocketServer.BaseRequestHandler):
                 listener_sock = ThreadedTCPClientSocket(self.server.local_ip,
                         top_listener.port, listener_q, remote_q,
                         self.server.config, self.server.logger)
+
+                # Get proxy initiated source port and report to diverter
+                new_sport = listener_sock.connect()
+                if new_sport:
+                    self.server.diverterListenerCallbacks.mapProxySportToOrigSport('TCP',
+                            orig_src_port, new_sport, is_ssl_encrypted)
+
                 listener_sock.daemon = True
                 listener_sock.start()
                 remote_sock.setblocking(0)
@@ -258,7 +286,7 @@ class ThreadedTCPRequestHandler(SocketServer.BaseRequestHandler):
                         else:
                             remote_sock.send(data)
 
-class ThreadedUDPRequestHandler(SocketServer.BaseRequestHandler):
+class ThreadedUDPRequestHandler(socketserver.BaseRequestHandler):
 
 
     def handle(self):
@@ -288,6 +316,12 @@ class ThreadedUDPRequestHandler(SocketServer.BaseRequestHandler):
                 sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
                 sock.bind((self.server.local_ip, 0))
 
+                # Get proxy initiated source port and report to diverter
+                new_sport = sock.getsockname()[1]
+                if new_sport:
+                    self.server.diverterListenerCallbacks.mapProxySportToOrigSport('UDP',
+                            orig_src_port, new_sport, 'No')
+
                 sock.sendto(data, (self.server.local_ip, int(top_listener.port)))
                 reply = sock.recv(BUF_SZ)
                 self.server.logger.debug('Received %d bytes.', len(data))
@@ -301,8 +335,8 @@ def hexdump_table(data, length=16):
     hexdump_lines = []
     for i in range(0, len(data), 16):
         chunk = data[i:i+16]
-        hex_line   = ' '.join(["%02X" % ord(b) for b in chunk ] )
-        ascii_line = ''.join([b if ord(b) > 31 and ord(b) < 127 else '.' for b in chunk ] )
+        hex_line   = ' '.join(["%02X" % b for b in chunk ] )
+        ascii_line = ''.join([chr(b) if b > 31 and b < 127 else '.' for b in chunk ] )
         hexdump_lines.append("%04X: %-*s %s" % (i, length*3, hex_line, ascii_line ))
     return hexdump_lines
 

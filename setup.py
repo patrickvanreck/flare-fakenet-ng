@@ -1,3 +1,5 @@
+# Copyright (C) 2016-2024 Mandiant, Inc. All rights reserved.
+
 import os
 import platform
 
@@ -14,6 +16,7 @@ requirements = [
     "pyftpdlib",
     "cryptography",
     "pyopenssl",
+    "jinja2",
 ]
 
 if platform.system() == 'Windows':
@@ -23,19 +26,19 @@ elif platform.system().lower().startswith('linux'):
 
 setup(
     name='FakeNet NG',
-    version='1.4.12',
+    version='3.2',
     description="",
     long_description="",
-    author="FireEye FLARE Team with credit to Peter Kacherginsky as the original developer",
-    author_email='FakeNet@fireeye.com',
-    url='https://www.github.com/fireeye/flare-fakenet-ng',
+    author="Mandiant FLARE Team with credit to Peter Kacherginsky as the original developer",
+    author_email='FakeNet@mandiant.com',
+    url='https://www.github.com/mandiant/flare-fakenet-ng',
     packages=[
         'fakenet',
     ],
     package_dir={'fakenet': 'fakenet'},
     package_data={'fakenet': ['*.pem','diverters/*.py', 'listeners/*.py',
-        'listeners/ssl_utils/*.py', 'listeners/ssl_utils/*.pem', 'configs/*.ini', 'defaultFiles/*',
-        'lib/64/*', 'lib/32/*']},
+        'listeners/ssl_utils/*.py', 'listeners/ssl_utils/*.pem', 'configs/*.ini',
+        'configs/html_report_template.html', 'defaultFiles/*', 'lib/64/*', 'lib/32/*']},
     entry_points={
         "console_scripts": [
             "fakenet=fakenet.fakenet:main",
@@ -49,6 +52,6 @@ setup(
         'Development Status :: 4 - Beta',
         'Intended Audience :: Developers',
         'Natural Language :: English',
-        "Programming Language :: Python :: 2",
+        'Programming Language :: Python :: 3',
     ],
 )

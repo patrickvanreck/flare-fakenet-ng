@@ -1,18 +1,22 @@
+# Copyright (C) 2016-2023 Mandiant, Inc. All rights reserved.
+
 import os
 import abc
 import sys
 import time
 import dpkt
 import signal
+import jinja2
 import socket
 import logging
 import threading
 import subprocess
 from . import fnpacket
 from . import fnconfig
-from debuglevels import *
+from .debuglevels import *
 from collections import namedtuple
 from collections import OrderedDict
+from pathlib import Path
 
 
 class DivertParms(object):
@@ -88,11 +92,16 @@ class DivertParms(object):
         Returns:
             True if this pair of endpoints hasn't conversed before, else False
         """
-        return not (self.diverter.sessions.get(self.pkt.sport) ==
-                    (self.pkt.dst_ip, self.pkt.dport))
+        # sessions.get returns (dst_ip, dport, pid, comm, dport0, proto) or
+        # None. We just want dst_ip and dport for comparison.
+        session = self.diverter.sessions.get(self.pkt.sport)
+        if session is None:
+            return True
 
+        return not ((session.dst_ip, session.dport) ==
+                        (self.pkt.dst_ip, self.pkt.dport))
 
-class DiverterPerOSDelegate(object):
+class DiverterPerOSDelegate(object, metaclass=abc.ABCMeta):
     """Delegate class for OS-specific methods that FakeNet-NG implementors must
     override.
 
@@ -105,7 +114,6 @@ class DiverterPerOSDelegate(object):
         check_gateways (currently only a warning)
         check_dns_servers (currently only a warning)
     """
-    __metaclass__ = abc.ABCMeta
 
     @abc.abstractmethod
     def check_active_ethernet_adapters(self):
@@ -332,7 +340,7 @@ class ListenerPorts(object):
 
     def getPortList(self, proto):
         if proto in self.protos:
-            return self.protos[proto].keys()
+            return list(self.protos[proto].keys())
         return []
 
     def intersectsWithPorts(self, proto, ports):
@@ -533,6 +541,18 @@ class DiverterBase(fnconfig.Config):
         self.logger = logging.getLogger('Diverter')
         self.logger.setLevel(logging_level)
 
+        # Network Based Indicators
+        self.nbis = {}
+
+        # Index remote Process IDs for MultiHost operations
+        self.remote_pid_counter = 0
+        
+        # Maps Proxy initiated source ports to original source ports
+        self.proxy_sport_to_orig_sport_map = {}
+
+        # Maps (proxy_sport, orig_sport) to pkt SSL encryption
+        self.is_proxied_pkt_ssl_encrypted = {}
+
         # Rate limiting for displaying pid/comm/proto/IP/port
         self.last_conn = None
 
@@ -540,7 +560,7 @@ class DiverterBase(fnconfig.Config):
         stringlists = ['HostBlackList']
         self.configure(diverter_config, portlists, stringlists)
         self.listeners_config = dict((k.lower(), v)
-                                     for k, v in listeners_config.iteritems())
+                                     for k, v in listeners_config.items())
 
         # Local IP address
         self.external_ip = socket.gethostbyname(socket.gethostname())
@@ -682,6 +702,8 @@ class DiverterBase(fnconfig.Config):
 
     def stop(self):
         self.logger.info('Stopping...')
+        self.prettyPrintNbi()
+        self.generate_html_report()
         return self.stopCallback()
 
     @abc.abstractmethod
@@ -773,7 +795,7 @@ class DiverterBase(fnconfig.Config):
 
         #######################################################################
         # Populate diverter ports and process filters from the configuration
-        for listener_name, listener_config in listeners_config.iteritems():
+        for listener_name, listener_config in listeners_config.items():
 
             if 'port' in listener_config:
 
@@ -1245,8 +1267,8 @@ class DiverterBase(fnconfig.Config):
             logline = fmt.format(
                 label=pkt.label,
                 proto=pkt.proto,
-                pid=pid,
-                comm=comm,
+                pid=str(pid),
+                comm=str(comm),
                 src=pkt.src_ip,
                 sport=pkt.sport,
                 dst=pkt.dst_ip,
@@ -1277,8 +1299,8 @@ class DiverterBase(fnconfig.Config):
             logline = fmt.format(
                 label=pkt.label,
                 proto=pkt.proto,
-                pid=pid,
-                comm=comm,
+                pid=str(pid),
+                comm=str(comm),
                 src=pkt.src_ip,
                 sport=pkt.sport,
                 dst=pkt.dst_ip,
@@ -1292,8 +1314,8 @@ class DiverterBase(fnconfig.Config):
             logline = fmt.format(
                 label=pkt.label,
                 proto='UNK',
-                pid=pid,
-                comm=comm,
+                pid=str(pid),
+                comm=str(comm),
                 src=str(pkt.src_ip),
                 sport=str(pkt.sport),
                 dst=str(pkt.dst_ip),
@@ -1754,7 +1776,11 @@ class DiverterBase(fnconfig.Config):
         Returns:
             None
         """
-        self.sessions[pkt.sport] = (pkt.dst_ip, pkt.dport)
+        session = namedtuple('session', ['dst_ip', 'dport', 'pid',
+                                         'comm', 'dport0', 'proto'])
+        pid, comm = self.get_pid_comm(pkt)
+        self.sessions[pkt.sport] = session(pkt.dst_ip, pkt.dport, pid,
+                                           comm, pkt._dport0, pkt.proto)
 
     def maybeExecuteCmd(self, pkt, pid, comm):
         """Execute any ExecuteCmd associated with this port/listener.
@@ -1774,4 +1800,214 @@ class DiverterBase(fnconfig.Config):
         if execCmd:
             self.logger.info('Executing command: %s' % (execCmd))
             self.execute_detached(execCmd)
+
+    def mapProxySportToOrigSport(self, proto, orig_sport, proxy_sport,
+            is_ssl_encrypted):
+        """Maps Proxy initiated source ports to their original source ports.
+
+        The Proxy listener uses this method to notify the diverter about the
+        proxy originated source port for the original source port. It also
+        notifies if the packet uses SSL encryption.
+
+        Args:
+            proto: str protocol of socket created by ProxyListener
+            orig_sport: int source port that originated the packet
+            proxy_sport: int source port initiated by Proxy listener
+            is_ssl_encrypted: bool is the packet SSL encrypted or not
+
+        Returns:
+            None
+        """
+        self.proxy_sport_to_orig_sport_map[(proto, proxy_sport)] = orig_sport
+        self.is_proxied_pkt_ssl_encrypted[(proto, proxy_sport)] = is_ssl_encrypted
+
+    def logNbi(self, sport, nbi, proto, application_layer_proto,
+            is_ssl_encrypted):
+        """Collects the NBIs from all listeners into a dictionary.
+
+        All listeners (currently only HTTPListener) use this
+        method to notify the diverter about any NBI captured
+        within their scope.
+
+        Args:
+            sport: int port bound by listener
+            nbi: dict NBI captured within the listener
+            proto: str protocol used by the listener
+            application_layer_proto: str Application layer protocol of the pkt
+            is_ssl_encrpted: str is the listener configured to use SSL or not
+
+        Returns:
+            None
+        """
+        proxied_nbi = (proto, sport) in self.proxy_sport_to_orig_sport_map
+        
+        # For proxied nbis, override the listener's is_ssl_encrypted with Proxy
+        # listener's is_ssl_encrypted, and update the original sport. For
+        # non-proxied nbis, use listener provided is_ssl_encrypted and sport.
+        if proxied_nbi:
+            orig_sport = self.proxy_sport_to_orig_sport_map[(proto, sport)]
+            is_ssl_encrypted = self.is_proxied_pkt_ssl_encrypted.get((proto, sport))
+        else:
+            orig_sport = sport
+
+        if self.sessions.get(orig_sport) is None:
+            return
+
+        dst_ip, _, pid, comm, orig_dport, transport_layer_proto = self.sessions.get(orig_sport)
+
+        if application_layer_proto == '':
+            application_layer_proto = transport_layer_proto
+
+        # Normalize pid and comm for MultiHost mode
+        if pid is None and comm is None and self.network_mode.lower() == 'multihost':
+            self.remote_pid_counter += 1
+            pid = self.remote_pid_counter
+            comm = 'Remote Process'
+
+        # Craft the dictionary
+        nbi_entry = {
+            'transport_layer_proto': transport_layer_proto,
+            'sport': orig_sport,
+            'dst_ip': dst_ip,
+            'dport': orig_dport,
+            'is_ssl_encrypted': is_ssl_encrypted,
+            'network_mode': self.network_mode.lower(),
+            'nbi': nbi
+            }
+        application_layer_proto = application_layer_proto.lower()
+ 
+        # If it's a new NBI from an exisitng process or existing protocol,
+        # append the nbi, else create new key
+        self.nbis.setdefault((pid, comm), {}).setdefault(application_layer_proto,
+                                                         []).append(nbi_entry)
+
+    def prettyPrintNbi(self):
+        """Convenience method to print all NBIs in appropriate format upon
+        fakenet session termination. Called by stop() method of diverter.
+        """
+        banner = r"""
+                                                                       
+                                                                       
+            NNNNNNNN        NNNNNNNNBBBBBBBBBBBBBBBBB   IIIIIIIIII                 
+            N:::::::N       N::::::NB::::::::::::::::B  I::::::::I                 
+            N::::::::N      N::::::NB::::::BBBBBB:::::B I::::::::I                 
+            N:::::::::N     N::::::NBB:::::B     B:::::BII::::::II                 
+            N::::::::::N    N::::::N  B::::B     B:::::B  I::::I      ssssssssss   
+            N:::::::::::N   N::::::N  B::::B     B:::::B  I::::I    ss::::::::::s  
+            N:::::::N::::N  N::::::N  B::::BBBBBB:::::B   I::::I  ss:::::::::::::s 
+            N::::::N N::::N N::::::N  B:::::::::::::BB    I::::I  s::::::ssss:::::s
+            N::::::N  N::::N:::::::N  B::::BBBBBB:::::B   I::::I   s:::::s  ssssss 
+            N::::::N   N:::::::::::N  B::::B     B:::::B  I::::I     s::::::s      
+            N::::::N    N::::::::::N  B::::B     B:::::B  I::::I        s::::::s   
+            N::::::N     N:::::::::N  B::::B     B:::::B  I::::I  ssssss   s:::::s 
+            N::::::N      N::::::::NBB:::::BBBBBB::::::BII::::::IIs:::::ssss::::::s
+            N::::::N       N:::::::NB:::::::::::::::::B I::::::::Is::::::::::::::s 
+            N::::::N        N::::::NB::::::::::::::::B  I::::::::I s:::::::::::ss  
+            NNNNNNNN         NNNNNNNBBBBBBBBBBBBBBBBB   IIIIIIIIII  sssssssssss    
+                                                                       
+                                                                                                               
+            ========================================================================
+                                Network-Based Indicators Summary
+            ========================================================================
+        """
+        indent = "  "
+        self.logger.info(banner)
+        process_counter = 0
+        for process_info, values in self.nbis.items():
+            process_counter += 1
+            self.logger.info(f"[{process_counter}] Process ID: "
+                    f"{process_info[0]}, Process Name: {process_info[1]}")
+
+            for application_layer_proto, nbi_entry in values.items():
+                self.logger.info(f"{indent*2} Protocol: "
+                                 f"{application_layer_proto}")
+                nbi_counter = 0
+
+                for attributes in nbi_entry:
+                    nbi_counter += 1
+                    self.logger.info(f"{indent*3}{nbi_counter}.Transport Layer "
+                                     f"Protocol: {attributes['transport_layer_proto']}")
+                    self.logger.info(f"{indent*4}Source port: {attributes['sport']}")
+                    self.logger.info(f"{indent*4}Destination IP: {attributes['dst_ip']}")
+                    self.logger.info(f"{indent*4}Destination port: {attributes['dport']}")
+                    self.logger.info(f"{indent*4}SSL encrypted: "
+                                     f"{attributes['is_ssl_encrypted']}")
+                    self.logger.info(f"{indent*4}Network mode: "
+                                     f"{attributes['network_mode']}")
+
+                    for key, v in attributes['nbi'].items():
+                        if v is not None:
+                            # Let's convert the NBI value to str if it's not already
+                            if isinstance(v, bytes):
+                                v = v.decode('utf-8')
+
+                            # Let's print maximum 40 characters for NBI values
+                            v = (v[:40]+"...") if len(v)>40 else v
+                        self.logger.info(f"{indent*6}-{key}: {v}")
+
+                    self.logger.info("\r")
+
+            self.logger.info("\r")
+
+    def generate_html_report(self):
+        """Generates an interactive HTML report containing NBI summary saved
+        to the main working directory of flare-fakenet-ng. Called by stop() method
+        of diverter.
+        """
+        if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
+            # Inside a Pyinstaller bundle
+            fakenet_dir_path = os.getcwd()
+        else:
+            fakenet_dir_path = os.fspath(Path(__file__).parents[1])
+
+        template_file = os.path.join(fakenet_dir_path, "configs", "html_report_template.html")
+        template_loader = jinja2.FileSystemLoader(searchpath=os.path.dirname(template_file))
+        template_env = jinja2.Environment(loader=template_loader)
+        template = template_env.get_template(os.path.basename(template_file))
+        
+        timestamp = time.strftime('%Y%m%d_%H%M%S')
+        output_filename = f"report_{timestamp}.html"
+
+        with open(output_filename, "w") as output_file:
+            output_file.write(template.render(nbis=self.nbis))
+        
+        self.logger.info(f"Generated new HTML report: {output_filename}")
+    
+    
+    
+class DiverterListenerCallbacks():
+    """A wrapper class for the diverter that provides controlled access to
+    specific methods required by listeners for reporting NBIs.  This prevents
+    exposing the entire diverter to the listeners.
+    """
+    def __init__(self, diverter):
+        """Initialize the DiverterWrapper.
+
+        Args:
+            diverter: The Diverter object
+        """
+        self.__diverter = diverter
+
+    def logNbi(self, sport, nbi, proto, application_layer_proto,
+            is_ssl_encrypted):
+        """Delegate the logging of NBIs to the diverter.
+
+        This method forwards the provided NBI information to the logNbi() method
+        in the underlying diverter object. Called by all listeners to log NBIs.
+        """
+        self.__diverter.logNbi(sport, nbi, proto, application_layer_proto,
+                               is_ssl_encrypted)
+
+    def mapProxySportToOrigSport(self, proto, orig_sport, proxy_sport,
+            is_ssl_encrypted):
+        """Delegate the mapping of proxy sport to original sport to the
+        diverter.
+
+        This method forwards the provided parameters to the
+        mapProxySportToOrigSport() method in the underlying diverter object.
+        Called by ProxyListener to report the mapping between proxy initiated
+        source port and original source port.
+        """
+        self.__diverter.mapProxySportToOrigSport(proto, orig_sport, proxy_sport,
+                                                 is_ssl_encrypted)
 

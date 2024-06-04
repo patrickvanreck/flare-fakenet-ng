@@ -1,3 +1,5 @@
+# Copyright (C) 2016-2023 Mandiant, Inc. All rights reserved.
+
 #!/usr/bin/env python
 import logging
 logging.basicConfig(format='%(asctime)s [%(name)18s] %(message)s',
@@ -15,7 +17,7 @@ from . import diverterbase
 
 import time
 
-from _winreg import *
+from winreg import *
 
 import subprocess
 
@@ -359,9 +361,10 @@ class WinUtilMixin(diverterbase.DiverterPerOSDelegate):
             # (Host-Only)
             if self.check_ipaddresses_interface(adapter) and adapter.DhcpEnabled:
 
-                (ip_address, netmask) = next(
-                    self.get_ipaddresses_netmask(adapter))
-                gw_address = ip_address[:ip_address.rfind('.')] + '.254'
+                (ip_address, netmask) = next(self.get_ipaddresses_netmask(adapter))
+                # set the gateway ip address to be that of the virtual network adapter
+                # https://docs.vmware.com/en/VMware-Workstation-Pro/17/com.vmware.ws.using.doc/GUID-9831F49E-1A83-4881-BB8A-D4573F2C6D91.html
+                gw_address = ip_address[:ip_address.rfind('.')] + '.1'
 
                 interface_name = self.get_adapter_friendlyname(adapter.Index)
 
@@ -379,7 +382,7 @@ class WinUtilMixin(diverterbase.DiverterPerOSDelegate):
                         subprocess.check_call(cmd_set_gw, shell=True,
                                               stdout=subprocess.PIPE,
                                               stderr=subprocess.PIPE)
-                    except subprocess.CalledProcessError, e:
+                    except subprocess.CalledProcessError as e:
                         self.logger.error("         Failed to set gateway %s on interface %s."
                                           % (gw_address, interface_name))
                     else:
@@ -416,13 +419,14 @@ class WinUtilMixin(diverterbase.DiverterPerOSDelegate):
 
                     # Configure DNS server
                     try:
-                        subprocess.check_call(cmd_set_dns,
+                        subprocess.check_output(cmd_set_dns,
                                               shell=True,
-                                              stdout=subprocess.PIPE,
                                               stderr=subprocess.PIPE)
-                    except subprocess.CalledProcessError, e:
+                    except subprocess.CalledProcessError as e:
                         self.logger.error("         Failed to set DNS %s on interface %s."
                                           % (dns_address, interface_name))
+                        self.logger.error("         netsh failed with error: %s"
+                                          % (e.output))
                     else:
                         self.logger.info("         Setting DNS %s on interface %s"
                                          % (dns_address, interface_name))
@@ -446,7 +450,7 @@ class WinUtilMixin(diverterbase.DiverterPerOSDelegate):
 
         for adapter in self.get_adapters_info():
             for gateway in self.get_gateways(adapter):
-                if gateway != '0.0.0.0':
+                if gateway != b'0.0.0.0':
                     return True
         else:
             return False
@@ -530,7 +534,7 @@ class WinUtilMixin(diverterbase.DiverterPerOSDelegate):
                                                       dwDesiredAccess)
 
         if service_handle == 0:
-            self.logger.error('Failed to call OpenService')
+            self.logger.error('OpenService failed for %s', service_name)
             return
 
         return service_handle
@@ -650,7 +654,7 @@ class WinUtilMixin(diverterbase.DiverterPerOSDelegate):
                                       service_name, shell=True,
                                       stdout=subprocess.PIPE,
                                       stderr=subprocess.PIPE)
-            except subprocess.CalledProcessError, e:
+            except subprocess.CalledProcessError as e:
                 self.logger.error(
                     'Failed to enable the service %s. (sc config)',
                     service_name)
@@ -700,7 +704,7 @@ class WinUtilMixin(diverterbase.DiverterPerOSDelegate):
                 subprocess.check_call("net start %s" % service_name,
                                       shell=True, stdout=subprocess.PIPE,
                                       stderr=subprocess.PIPE)
-            except subprocess.CalledProcessError, e:
+            except subprocess.CalledProcessError as e:
                 self.logger.error(
                     'Failed to start the service %s. (net stop)', service_name)
             else:
@@ -739,7 +743,7 @@ class WinUtilMixin(diverterbase.DiverterPerOSDelegate):
                                       service_name, shell=True,
                                       stdout=subprocess.PIPE,
                                       stderr=subprocess.PIPE)
-            except subprocess.CalledProcessError, e:
+            except subprocess.CalledProcessError as e:
                 self.logger.error(
                     'Failed to disable the service %s. (sc config)', service_name)
             else:
@@ -788,7 +792,7 @@ class WinUtilMixin(diverterbase.DiverterPerOSDelegate):
                 subprocess.check_call("net stop %s" % service_name,
                                       shell=True, stdout=subprocess.PIPE,
                                       stderr=subprocess.PIPE)
-            except subprocess.CalledProcessError, e:
+            except subprocess.CalledProcessError as e:
                 self.logger.error(
                     'Failed to stop the service %s. (net stop)', service_name)
             else:
@@ -902,7 +906,8 @@ class WinUtilMixin(diverterbase.DiverterPerOSDelegate):
                 lpImageFileName = create_string_buffer(MAX_PATH)
 
                 if windll.psapi.GetProcessImageFileNameA(hProcess, lpImageFileName, MAX_PATH) > 0:
-                    process_name = os.path.basename(lpImageFileName.value)
+                    # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-dtyp/3f6cc0e2-1303-4088-a26b-fb9582f29197
+                    process_name = os.path.basename(lpImageFileName.value.decode("utf-8"))
                 else:
                     self.logger.error('Failed to call GetProcessImageFileNameA, %d' %
                                       (ctypes.GetLastError()))
@@ -1033,7 +1038,7 @@ class WinUtilMixin(diverterbase.DiverterPerOSDelegate):
 
         while ipaddress:
 
-            yield ipaddress.IpAddress.String
+            yield ipaddress.IpAddress.String.decode("utf-8")
             ipaddress = ipaddress.Next
 
     def get_ipaddresses_netmask(self, adapter):
@@ -1042,7 +1047,7 @@ class WinUtilMixin(diverterbase.DiverterPerOSDelegate):
 
         while ipaddress:
 
-            yield (ipaddress.IpAddress.String, ipaddress.IpMask.String)
+            yield (ipaddress.IpAddress.String.decode("utf-8"), ipaddress.IpMask.String.decode("utf-8"))
             ipaddress = ipaddress.Next
 
     def get_ipaddresses_index(self, index):
@@ -1057,7 +1062,7 @@ class WinUtilMixin(diverterbase.DiverterPerOSDelegate):
         for adapter in self.get_adapters_info():
             for gateway in self.get_gateways(adapter):
                 if gateway != '0.0.0.0':
-                    return self.get_ipaddresses(adapter).next()
+                    return next(self.get_ipaddresses(adapter))
         else:
             return None
 
@@ -1200,7 +1205,7 @@ class WinUtilMixin(diverterbase.DiverterPerOSDelegate):
         try:
             subprocess.check_call(
                 'ipconfig /flushdns', shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        except subprocess.CalledProcessError, e:
+        except subprocess.CalledProcessError as e:
             self.logger.error("Failed to flush DNS cache. Local machine may "
                               "use cached DNS results.")
         else:
@@ -1244,25 +1249,25 @@ class WinUtilMixin(diverterbase.DiverterPerOSDelegate):
         value = 'NameServer'
 
         for adapter in self.get_active_ethernet_adapters():
-
+            adapter_name = adapter.AdapterName.decode("utf-8")
             # Preserve existing setting
             dns_server_backup = self.get_reg_value(key, sub_key %
-                                                   adapter.AdapterName, value)
+                                                   adapter_name, value)
 
             # Restore previous value or a blank string if the key was not
             # present
             if dns_server_backup:
-                self.adapters_dns_server_backup[adapter.AdapterName] = (
+                self.adapters_dns_server_backup[adapter_name] = (
                     dns_server_backup, adapter.FriendlyName)
             else:
-                self.adapters_dns_server_backup[adapter.AdapterName] = (
+                self.adapters_dns_server_backup[adapter_name] = (
                     '', adapter.FriendlyName)
 
             # Set new dns server value
-            if self.set_reg_value(key, sub_key % adapter.AdapterName, value, dns_server):
-                self.logger.debug('Set DNS server %s on the adapter: %s',
+            if self.set_reg_value(key, sub_key % adapter_name, value, dns_server):
+                self.logger.error('Set DNS server %s on the adapter: %s',
                                  dns_server, adapter.FriendlyName)
-                self.notify_ip_change(adapter.AdapterName)
+                self.notify_ip_change(adapter_name)
             else:
                 self.logger.error(
                     'Failed to set DNS server %s on the adapter: %s', dns_server, adapter.FriendlyName)
@@ -1339,7 +1344,7 @@ def test_interfaces_list():
 
     for adapter in self.get_active_ethernet_adapters():
         self.logger.info('active ethernet index: %s friendlyname: %s name: %s',
-                         adapter.IfIndex, adapter.FriendlyName, adapter.AdapterName)
+                         adapter.IfIndex, adapter.FriendlyName, adapter.AdapterName.decode('utf-8'))
 
 
 def test_registry_nameserver():

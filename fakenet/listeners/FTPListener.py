@@ -1,10 +1,12 @@
+# Copyright (C) 2016-2023 Mandiant, Inc. All rights reserved.
+
 import logging
 
 import os
 import sys
 
 import threading
-import SocketServer
+import socketserver
 
 import ssl
 import socket
@@ -16,21 +18,21 @@ from pyftpdlib.handlers import FTPHandler, TLS_FTPHandler
 from pyftpdlib.filesystems import AbstractedFS
 from pyftpdlib.servers import ThreadedFTPServer
 
-import BannerFactory
+from . import BannerFactory
 
 FAKEUSER = 'FAKEUSER'
 FAKEPWD  = 'FAKEPWD'
 
 
 EXT_FILE_RESPONSE = {
-    '.html': u'FakeNet.html',
-    '.png' : u'FakeNet.png',
-    '.ico' : u'FakeNet.ico',
-    '.jpeg': u'FakeNet.jpg',
-    '.exe' : u'FakeNetMini.exe',
-    '.pdf' : u'FakeNet.pdf',
-    '.xml' : u'FakeNet.html',
-    '.txt' : u'FakeNet.txt',
+    '.html': 'FakeNet.html',
+    '.png' : 'FakeNet.png',
+    '.ico' : 'FakeNet.ico',
+    '.jpeg': 'FakeNet.jpg',
+    '.exe' : 'FakeNetMini.exe',
+    '.pdf' : 'FakeNet.pdf',
+    '.xml' : 'FakeNet.html',
+    '.txt' : 'FakeNet.txt',
 }
 
 # Adapted from various sources including https://github.com/turbo/openftp4
@@ -156,6 +158,11 @@ class FakeFTPHandler(FTPHandler, object):
         if not self.authorizer.has_user(self.username):
             self.authorizer.add_user(self.username, line, self.ftproot_path, 'elradfmwM')
 
+        # Collect NBIs
+        nbi = {"Command": "PASS", "Username": self.username, "Password": line}
+        collect_nbi(self.remote_port, nbi, self.server.config.get('usessl'),
+                    self.server.diverterListenerCallbacks)
+
         return super(FakeFTPHandler, self).ftp_PASS(line)
 
 class TLS_FakeFTPHandler(TLS_FTPHandler, object):
@@ -166,11 +173,22 @@ class TLS_FakeFTPHandler(TLS_FTPHandler, object):
         if not self.authorizer.has_user(self.username):
             self.authorizer.add_user(self.username, line, self.ftproot_path, 'elradfmwM')
 
+        # Collect NBIs
+        nbi = {"Command": "PASS", "Username": self.username, "Password": line}
+        collect_nbi(self.remote_port, nbi, self.server.config.get('usessl'),
+                    self.server.diverterListenerCallbacks)
+
         return super(TLS_FakeFTPHandler, self).ftp_PASS(line)
 
 class FakeFS(AbstractedFS):
 
     def open(self, filename, mode):
+
+        # Collect NBIs
+        nbi = {"Command": "RETR", "Filename": filename, "Mode": mode}
+        collect_nbi(self.cmd_channel.remote_port, nbi,
+                    self.cmd_channel.server.config.get('usessl'),
+                    self.cmd_channel.server.diverterListenerCallbacks)
 
         # If virtual filename does not exist return a default file based on extention
         if not self.lexists(filename):
@@ -178,24 +196,48 @@ class FakeFS(AbstractedFS):
             file_basename, file_extension = os.path.splitext(filename)
 
             # Calculate absolute path to a fake file
-            filename = os.path.join(os.path.dirname(filename), EXT_FILE_RESPONSE.get(file_extension.lower(), u'FakeNetMini.exe'))
+            filename = os.path.join(os.path.dirname(filename), EXT_FILE_RESPONSE.get(file_extension.lower(), 'FakeNetMini.exe'))
 
         return super(FakeFS, self).open(filename, mode)
 
     def chdir(self, path):
 
+        # Collect NBIs
+        nbi = {"Command": "CWD", "Path": path}
+        collect_nbi(self.cmd_channel.remote_port, nbi,
+                    self.cmd_channel.server.config.get('usessl'),
+                    self.cmd_channel.server.diverterListenerCallbacks)
+
         # If virtual directory does not exist change to the current directory
         if not self.lexists(path):
-            path = u'.'
+            path = '.'
 
         return super(FakeFS, self).chdir(path)
 
     def remove(self, path):
 
+        # Collect NBIs
+        actual_ftp_path = self.fs2ftp(path)
+        if actual_ftp_path.startswith('/'):
+            actual_ftp_path = actual_ftp_path[1:] # remove leading '/'
+        nbi = {"Command": "DELETE", "Filename": actual_ftp_path}
+        collect_nbi(self.cmd_channel.remote_port, nbi,
+                    self.cmd_channel.server.config.get('usessl'),
+                    self.cmd_channel.server.diverterListenerCallbacks)
+
         # Don't remove anything
         pass
 
     def rmdir(self, path):
+
+        # Collect NBIs
+        actual_ftp_path = self.fs2ftp(path)
+        if actual_ftp_path.startswith('/'):
+            actual_ftp_path = actual_ftp_path[1:] # remove leading '/'
+        nbi = {"Command": "RMD", "Directory": actual_ftp_path}
+        collect_nbi(self.cmd_channel.remote_port, nbi,
+                    self.cmd_channel.server.config.get('usessl'),
+                    self.cmd_channel.server.diverterListenerCallbacks)
 
         # Don't remove anything
         pass
@@ -207,12 +249,12 @@ class FTPListener(object):
         # See RFC5797 for full command list. Many of these commands are not likely
         # to be used but are included in case malware uses FTP in unexpected ways
         base_ftp_commands = [
-            'abor', 'acct', 'allo', 'appe', 'cwd', 'dele', 'help', 'list', 'mode', 
-            'nlst', 'noop', 'pass', 'pasv', 'port', 'quit', 'rein', 'rest', 'retr',
-            'rnfr', 'rnto', 'site', 'stat', 'stor', 'stru', 'type', 'user'
+            b'abor', b'acct', b'allo', b'appe', b'cwd', b'dele', b'help', b'list', b'mode',
+            b'nlst', b'noop', b'pass', b'pasv', b'port', b'quit', b'rein', b'rest', b'retr',
+            b'rnfr', b'rnto', b'site', b'stat', b'stor', b'stru', b'type', b'user'
         ]
         opt_ftp_commands = [
-            'cdup', 'mkd', 'pwd', 'rmd', 'smnt', 'stou', 'syst'
+            b'cdup', b'mkd', b'pwd', b'rmd', b'smnt', b'stou', b'syst'
         ]
 
         confidence = 1 if dport == 21 else 0 
@@ -247,7 +289,7 @@ class FTPListener(object):
         self.logger.debug('Starting...')
 
         self.logger.debug('Initialized with config:')
-        for key, value in config.iteritems():
+        for key, value in config.items():
             self.logger.debug('  %10s: %s', key, value)
 
         # Initialize ftproot directory
@@ -263,8 +305,8 @@ class FTPListener(object):
             if '-' not in i:
                 ports.append(int(i))
             else:
-                l,h = map(int, i.split('-'))
-                ports+= range(l,h+1)
+                l,h = list(map(int, i.split('-')))
+                ports+= list(range(l,h+1))
         return ports
 
     def start(self):
@@ -297,6 +339,7 @@ class FTPListener(object):
 
 
         self.server = ThreadedFTPServer((self.local_ip, int(self.config['port'])), self.handler)
+        self.server.config = self.config
 
         # Override pyftpdlib logger name
         logging.getLogger('pyftpdlib').name = self.name
@@ -314,6 +357,14 @@ class FTPListener(object):
     def genBanner(self):
         bannerfactory = BannerFactory.BannerFactory()
         return bannerfactory.genBanner(self.config, BANNERS)
+
+    def acceptDiverterListenerCallbacks(self, diverterListenerCallbacks):
+        self.server.diverterListenerCallbacks = diverterListenerCallbacks
+
+def collect_nbi(sport, nbi, is_ssl_encrypted, diverterCallbacks):
+
+    # Report diverter everytime we capture an NBI
+    diverterCallbacks.logNbi(sport, nbi, 'TCP', 'FTP', is_ssl_encrypted)
 
 ###############################################################################
 # Testing code

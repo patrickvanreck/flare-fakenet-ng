@@ -1,16 +1,3 @@
-Development Suspended
-=====================
-
-The FLARE Team must suspend development and maintenance of FakeNet-NG for the
-time being.
-
-FLARE has opted to indicate the project status here instead of archiving the
-project. This will allow users and maintainers to continue to log issues
-documenting valuable information about problems, troubleshooting, and
-work-arounds.
-
-Original Documentation Follows
-==============================
      ______      _  ________ _   _ ______ _______     _   _  _____
     |  ____/\   | |/ /  ____| \ | |  ____|__   __|   | \ | |/ ____|
     | |__ /  \  | ' /| |__  |  \| | |__     | |______|  \| | |  __
@@ -20,7 +7,7 @@ Original Documentation Follows
 
            D   O   C   U   M   E   N   T   A   T   I   O   N
 
-FakeNet-NG is a next generation dynamic network analysis tool for malware
+FakeNet-NG 3.2 is a next generation dynamic network analysis tool for malware
 analysts and penetration testers. It is open source and designed for the latest
 versions of Windows (and Linux, for certain modes of operation). FakeNet-NG is
 based on the excellent Fakenet tool developed by Andrew Honig and Michael
@@ -36,7 +23,10 @@ application's specific functionality and prototyping PoCs.
 Installation
 ============
 
-You can install FakeNet-NG in a few different ways.
+You can install FakeNet-NG in a few different ways. Note that the following
+installation processes will retrieve third-party open-source libraries used
+by FakeNet-NG to your system. These libraries will be dynamically loaded at
+runtime, and some of these libraries may be LGPL licensed.
 
 Stand-alone executable
 ----------------------
@@ -44,7 +34,7 @@ Stand-alone executable
 It is easiest to simply download the compiled version which can be obtained from
 the releases page:
 
-    https://github.com/fireeye/flare-fakenet-ng/releases
+    https://github.com/mandiant/flare-fakenet-ng/releases
 
 Execute FakeNet-NG by running 'fakenet.exe'.
 
@@ -54,10 +44,6 @@ analysis machine.
 
 Installing module
 -----------------
-
-Installation on Windows requires the following dependency:
- * [Microsoft Visual C++ Compiler for Python 2.7](https://aka.ms/vcpython27)
-
 Installation on Linux requires the following dependencies:
  * Python pip package manager (e.g. python-pip for Ubuntu).
  * Python development files (e.g. python-dev for Ubuntu).
@@ -66,13 +52,17 @@ Installation on Linux requires the following dependencies:
  * libnetfilterqueue development files (e.g. libnetfilter-queue-dev for
    Ubuntu).
 
+Install these dependencies using the following command:
+
+    sudo apt-get install build-essential python-dev libnetfilter-queue-dev
+
 Install FakeNet-NG as a Python module using pip:
 
-    pip install https://github.com/fireeye/flare-fakenet-ng/zipball/master
+    pip install https://github.com/mandiant/flare-fakenet-ng/zipball/master
 
 Or by obtaining the latest source code and installing it manually:
 
-    git clone https://github.com/fireeye/flare-fakenet-ng/
+    git clone https://github.com/mandiant/flare-fakenet-ng/
 
 Change directory to the downloaded flare-fakenet-ng and run:
 
@@ -87,7 +77,7 @@ Finally if you would like to avoid installing FakeNet-NG and just want to run it
 as-is (e.g. for development), then you would need to obtain the source code and
 install dependencies as follows:
 
-1) Install 64-bit or 32-bit Python 2.7.x for the 64-bit or 32-bit versions
+1) Install 64-bit or 32-bit Python 3.7.x for the 64-bit or 32-bit versions
    of Windows respectively.
 
 2) Install Python dependencies:
@@ -104,12 +94,12 @@ install dependencies as follows:
 
 3) Download the FakeNet-NG source code:
 
-    git clone https://github.com/fireeye/flare-fakenet-ng
+    git clone https://github.com/mandiant/flare-fakenet-ng
 
 Execute FakeNet-NG by running it with a Python interpreter in a privileged
 shell:
 
-    python fakenet.py
+    python -m fakenet.fakenet
 
 Usage
 =====
@@ -126,11 +116,12 @@ parameter to get simple help:
      | | / ____ \| . \| |____| |\  | |____   | |      | |\  | |__| |
      |_|/_/    \_\_|\_\______|_| \_|______|  |_|      |_| \_|\_____|
 
-                             Version  1.0
+                             Version  3.2
       _____________________________________________________________
                        Developed by FLARE Team
+        Copyright (C) 2016-2024 Mandiant, Inc. All rights reserved.
       _____________________________________________________________
-    Usage: fakenet.py [options]:
+    Usage: python -m fakenet.fakenet [options]:
 
     Options:
       -h, --help            show this help message and exit
@@ -180,9 +171,10 @@ and an HTTP connection:
      | | / ____ \| . \| |____| |\  | |____   | |      | |\  | |__| |
      |_|/_/    \_\_|\_\______|_| \_|______|  |_|      |_| \_|\_____|
 
-                             Version  1.0
+                             Version  3.2
       _____________________________________________________________
                        Developed by FLARE Team
+        Copyright (C) 2016-2024 Mandiant, Inc. All rights reserved.
       _____________________________________________________________
 
     07/06/16 10:20:52 PM [           FakeNet] Loaded configuration file: configs/default.ini
@@ -254,13 +246,49 @@ logs will be labeled with the name set in the configuration file:
 
     07/06/16 10:21:03 PM [        DNS Server] Received A request for domain 'evil.com'.
 
-To stop FakeNet-NG and close out the generated PCAP file simply press `CTRL-C`:
+To stop FakeNet-NG and save the generated PCAP file and HTML report to disk simply press `CTRL-C`:
 
     07/06/16 10:21:41 PM [           FakeNet] Stopping...
     07/06/16 10:21:42 PM [    HTTPListener80] Stopping...
     07/06/16 10:21:42 PM [   HTTPListener443] Stopping...
     07/06/16 10:21:42 PM [      SMTPListener] Stopping...
     07/06/16 10:21:43 PM [          Diverter] Stopping...
+	07/06/16 10:21:43 PM [          Diverter] Generated new HTML report: report_20160607_102143.html
+
+User Interface
+--------------
+
+With each session of FakeNet-NG, an HTML report containing the Network-Based Indicators (NBIs) captured throughout the session is generated. Upon termination of FakeNet by pressing `CTRL-C`, this HTML file will be saved to the root directory of FakeNet. A user can review the NBIs by viewing this HTML file in a browser such as Chrome or Firefox.
+
+The HTML report serves as an interactive Graphical User Interface (GUI) that presents the NBI summary in a user-friendly manner. It includes various features to select, filter, and copy NBIs, making network analysis easier. The UI organizes all NBIs based on their process information and then further categorizes them by the application layer or transport layer protocol they use.
+
+#### NBI Summary Table
+The information in the NBI summary table is presented in a tabular format and includes the following details:
+
+ * Select: Clicking on the checkbox selects the corresponding NBI. You can select multiple NBIs across different or the same protocols. The entire row can also be selected by clicking anywhere within the row. Selected NBIs can be copied using the "Copy Selected NBIs" button.
+
+ * NBI: This cell represents the actual captured NBI. It includes commands, parameters, URIs, and other significant activity generated by the client against the listener. This cell summarizes malware behavior for better understanding.
+
+ * Additional Information: This cell provides extra information about each NBI request such as the transport layer protocol used, destination IP, port, and SSL encryption.
+
+ * Actions: This cell allows you to perform actions on individual NBIs. Currently, only copying is supported. Clicking the copy button copies the specific NBI cell data in a markdown format suitable for creating reports.
+
+#### Interactive Features
+The UI also includes various interactive features:
+
+ * Checkbox Selection: Checkboxes are available before each process and protocol block. Ticking a checkbox selects all NBIs under that process or protocol. This is useful when you want to select all NBIs from a particular process or protocol. You can then use the `Copy Selected NBIs` button to copy the selected data.
+
+ * Search Bar: The search bar lets you type keywords, and only the rows containing these keywords in the process name, NBI, or additional information will be displayed in the HTML page. You can then use the "Copy Filtered Data" button to copy the displayed data in markdown format. Clearing the search query restores the original table view.
+
+ * Copy Buttons:
+
+	 * `Copy Selected Data`: Copies all the selected NBIs in markdown format. You can select individual NBIs or all NBIs under a process by ticking checkboxes.
+	 * `Copy Filtered Data`: Copies the filtered NBIs' data in markdown format. If no search query is used, this button copies the entire data.
+	 * `Copy All NBIs`: Copies all the NBIs in markdown format present in the HTML page. Even if a filter is applied, clicking this button copies all NBIs.
+
+ * Disclaimer Button: Displays the disclaimer, which outlines important facts for the user to consider before making assumptions about the displayed NBI summary.
+
+ * Go To Top Button: Appears when the page's content exceeds the viewable area. Clicking this button takes you to the top of the page, where you can access important buttons like `Copy Selected NBIs`,` Copy All NBIs`, `Copy Filtered NBIs`, and the search bar.
 
 Configuration
 -------------
@@ -847,5 +875,5 @@ Contact
 =======
 
 For bugs, crashes, or other comments please contact
-FakeNet@fireeye.com.
+FakeNet@mandiant.com.
 

@@ -1,15 +1,17 @@
+# Copyright (C) 2016-2023 Mandiant, Inc. All rights reserved.
+
 import logging
 
 import sys
 import os
 
 import threading
-import SocketServer
+import socketserver
 
 import ssl
 import socket
 
-import BannerFactory
+from . import BannerFactory
 
 from . import *
 
@@ -48,15 +50,15 @@ class IRCListener(object):
             ]
 
         # ubuntu xchat uses 8001
-        ports = [194, 6667, range(6660, 7001), 8001]
+        ports = [194, 6667, list(range(6660, 7001)), 8001]
         
         confidence = 1 if dport in ports else 0
-        
+
         data = data.lstrip()
 
         # remove optional prefix
-        if data.startswith(':'):
-            data = data.split(' ')[0]
+        if data.startswith(b':'):
+            data = data.split(b' ')[0].decode()
 
         for command in commands:
             if data.startswith(command):
@@ -85,7 +87,7 @@ class IRCListener(object):
         self.logger.debug('Starting...')
 
         self.logger.debug('Initialized with config:')
-        for key, value in config.iteritems():
+        for key, value in config.items():
             self.logger.debug('  %10s: %s', key, value)
 
     def start(self):
@@ -112,7 +114,10 @@ class IRCListener(object):
         bannerfactory = BannerFactory.BannerFactory()
         return bannerfactory.genBanner(self.config, BANNERS)
 
-class ThreadedTCPRequestHandler(SocketServer.BaseRequestHandler):
+    def acceptDiverterListenerCallbacks(self, diverterListenerCallbacks):
+        self.server.diverterListenerCallbacks = diverterListenerCallbacks
+
+class ThreadedTCPRequestHandler(socketserver.BaseRequestHandler):
 
     def handle(self):
 
@@ -125,14 +130,14 @@ class ThreadedTCPRequestHandler(SocketServer.BaseRequestHandler):
 
             while True:
 
-                data = self.request.recv(1024)
+                data = self.request.recv(1024).decode()
 
                 if not data:
                     break
 
                 elif len(data) > 0:
 
-                    for line in data.split("\n"):
+                    for line in data.split('\n'):
 
                         if line and len(line) > 0:
 
@@ -150,12 +155,20 @@ class ThreadedTCPRequestHandler(SocketServer.BaseRequestHandler):
         except socket.error as msg:
             self.server.logger.error('Error: %s', msg.strerror or msg)
 
-        except Exception, e:
+        except Exception as e:
             self.server.logger.error('Error: %s', e)
 
     def irc_DEFAULT(self, cmd, params):
-        self.server.logger.info('Client issued an unknown command %s %s', cmd, params)      
-        self.irc_send_server("421", "%s :Unknown command" % cmd)          
+        self.server.logger.info('Client issued an unknown command %s %s', cmd, params)
+        self.irc_send_server("421", "%s :Unknown command" % cmd)
+
+        # Collect NBIs
+        params = None if params == '' else params
+        nbi = {
+            "Command": cmd + ' (Unknown command)',
+            "Params": params
+            }
+        self.collect_nbi(nbi)
 
     def irc_NICK(self, cmd, params):
 
@@ -166,6 +179,14 @@ class ThreadedTCPRequestHandler(SocketServer.BaseRequestHandler):
         self.irc_send_server("001", "%s :%s" % (self.nick, banner))
         self.irc_send_server("376", "%s :End of /MOTD command." % self.nick)
 
+        # Collect NBIs
+        params = None if params == '' else params
+        nbi = {
+            "Command": cmd,
+            "Params": params
+            }
+        self.collect_nbi(nbi)
+
     def irc_USER(self, cmd, params):
         if params.count(' ') == 3:
 
@@ -173,10 +194,27 @@ class ThreadedTCPRequestHandler(SocketServer.BaseRequestHandler):
             self.user = user
             self.mode = mode
             self.realname = realname
-            self.request.sendall('')
+            self.request.sendall(b'')
+
+            # Collect NBIs
+            nbi = {
+                "Command": cmd,
+                "User": user,
+                "Mode": mode,
+                "Real name": realname
+                }
+            self.collect_nbi(nbi)
 
     def irc_PING(self, cmd, params):
-        self.request.sendall(":%s PONG :%s" % (self.server.servername, self.server.servername))
+        self.request.sendall((":%s PONG :%s" % (self.server.servername, self.server.servername)).encode())
+
+        # Collect NBIs
+        params = None if params == '' else params
+        nbi = {
+            "Command": cmd,
+            "Params": params
+            }
+        self.collect_nbi(nbi)
 
 
     def irc_JOIN(self, cmd, params):
@@ -196,7 +234,7 @@ class ThreadedTCPRequestHandler(SocketServer.BaseRequestHandler):
                 self.server.logger.info('Client %s is joining channel %s with no key', self.nick, channel_name)
 
 
-            self.request.sendall(":root TOPIC %s :FakeNet\r\n" % channel_name)
+            self.request.sendall((":root TOPIC %s :FakeNet\r\n" % channel_name).encode())
             self.irc_send_client("JOIN :%s" % channel_name)
 
             nicks = ['botmaster', 'bot', 'admin', 'root', 'master']
@@ -205,6 +243,14 @@ class ThreadedTCPRequestHandler(SocketServer.BaseRequestHandler):
 
             # Send a welcome message
             self.irc_send_client_custom('botmaster', 'botmaster', self.server.servername, "PRIVMSG %s %s" % (channel_name, "Welcome to the channel! %s" % self.nick))
+
+            # Collect NBIs
+            nbi = {
+                "Command": cmd,
+                "Channel Names": channel_names,
+                "Channel Keys": channel_keys
+                }
+            self.collect_nbi(nbi)
 
 
     def irc_PRIVMSG(self, cmd, params):
@@ -222,23 +268,50 @@ class ThreadedTCPRequestHandler(SocketServer.BaseRequestHandler):
             else:
                 self.irc_send_client_custom(target, target, self.server.servername, "PRIVMSG %s %s" % (self.nick, message))
 
+            # Collect NBIs
+            nbi = {
+                "Command": cmd,
+                "Target": target,
+                "Message": message
+                }
+            self.collect_nbi(nbi)
+
 
     def irc_NOTICE(self, cmd, params):
+        # Collect NBIs
+        nbi = {
+            "Command": cmd,
+            "Params": params
+            }
+        self.collect_nbi(nbi)
         pass
 
     def irc_PART(self, cmd, params):
+        # Collect NBIs
+        nbi = {
+            "Command": cmd,
+            "Params": params
+            }
+        self.collect_nbi(nbi)
         pass
 
     def irc_send_server(self, code, message):
-        self.request.sendall(":%s %s %s\r\n" % (self.server.servername, code, message))
+        self.request.sendall((":%s %s %s\r\n" % (self.server.servername, code, message)).encode())
 
     def irc_send_client(self, message):
         self.irc_send_client_custom(self.nick, self.user, self.server.servername, message)
 
     def irc_send_client_custom(self, nick, user, servername, message):
-        self.request.sendall(":%s!%s@%s %s\r\n" % (nick, user, servername, message))
+        self.request.sendall((":%s!%s@%s %s\r\n" % (nick, user, servername, message)).encode())
 
-class ThreadedTCPServer(SocketServer.ThreadingMixIn, SocketServer.TCPServer):
+    def collect_nbi(self, nbi):
+        # Report diverter everytime we capture an NBI
+        # We are not handling SSL encrypted requests, so pass
+        # is_ssl_encrypted = 'No'
+        self.server.diverterListenerCallbacks.logNbi(self.client_address[1],
+                                                     nbi, 'TCP', 'IRC', 'No')
+
+class ThreadedTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
     # Avoid [Errno 98] Address already in use due to TIME_WAIT status on TCP
     # sockets, for details see:
     # https://stackoverflow.com/questions/4465959/python-errno-98-address-already-in-use

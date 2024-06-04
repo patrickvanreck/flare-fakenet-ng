@@ -1,10 +1,12 @@
+# Copyright (C) 2016-2024 Mandiant, Inc. All rights reserved.
+
 #!/usr/bin/env python
 #
 # FakeNet-NG is a next generation dynamic network analysis tool for malware
 # analysts and penetration testers.
 #
 # Original developer: Peter Kacherginsky
-# Current developer: FireEye FLARE Team (FakeNet@fireeye.com)
+# Current developer: Mandiant FLARE Team (FakeNet@mandiant.com)
 
 import logging
 import logging.handlers
@@ -18,7 +20,7 @@ import threading
 from collections import OrderedDict
 
 from optparse import OptionParser,OptionGroup
-from ConfigParser import ConfigParser
+from configparser import ConfigParser
 
 import platform
 
@@ -27,8 +29,8 @@ from collections import namedtuple
 
 ###############################################################################
 # Listener services
-import listeners
-from listeners import *
+from fakenet import listeners
+from fakenet.listeners import *
 
 ###############################################################################
 # FakeNet
@@ -60,14 +62,19 @@ class Fakenet(object):
         self.running_listener_providers = list()
 
     def parse_config(self, config_filename):
+        # Handling Pyinstaller bundle scenario: https://pyinstaller.org/en/stable/runtime-information.html
+        if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
+            dir_path = os.getcwd()
+        else:
+            dir_path = os.path.dirname(__file__)
 
         if not config_filename:
 
-            config_filename = os.path.join(os.path.dirname(__file__), 'configs', 'default.ini')
+            config_filename = os.path.join(dir_path, 'configs', 'default.ini')
 
         if not os.path.exists(config_filename):
 
-            config_filename = os.path.join(os.path.dirname(__file__), 'configs', config_filename)
+            config_filename = os.path.join(dir_path, 'configs', config_filename)
 
             if not os.path.exists(config_filename):
 
@@ -103,8 +110,8 @@ class Fakenet(object):
             if '-' not in i:
                 ports.append(int(i))
             else:
-                l,h = map(int, i.split('-'))
-                ports+= range(l,h+1)
+                l,h = list(map(int, i.split('-')))
+                ports+= list(range(l,h+1))
         return ports
 
     def expand_listeners(self, listeners_config):
@@ -164,7 +171,7 @@ class Fakenet(object):
                 if self.diverter_config['networkmode'].lower() == 'auto':
                     self.diverter_config['networkmode'] = 'singlehost'
 
-                from diverters.windows import Diverter
+                from fakenet.diverters.windows import Diverter
                 self.diverter = Diverter(self.diverter_config, self.listeners_config, ip_addrs, self.logging_level)
 
             elif platform_name.lower().startswith('linux'):
@@ -190,7 +197,7 @@ class Fakenet(object):
                                 fn_iface)
                             sys.exit(1)
 
-                from diverters.linux import Diverter
+                from fakenet.diverters.linux import Diverter
                 self.diverter = Diverter(self.diverter_config, self.listeners_config, ip_addrs, self.logging_level)
 
             else:
@@ -198,6 +205,10 @@ class Fakenet(object):
                     'Error: Your system %s is currently not supported.' %
                     (platform_name))
                 sys.exit(1)
+
+        # Import DiverterListenerCallbacks
+        from fakenet.diverters.diverterbase import DiverterListenerCallbacks
+        self.diverterListenerCallbacks = DiverterListenerCallbacks(self.diverter)
 
         # Start all of the listeners
         for listener_name in self.listeners_config:
@@ -257,6 +268,13 @@ class Fakenet(object):
                 listener.acceptDiverter(self.diverter)
             except AttributeError:
                 self.logger.debug("acceptDiverter() not implemented by Listener %s" % listener.name)
+
+            # Only listeners that implement acceptDiverterListenerCallbacks(diverterListenerCallbacks)
+            # interface receive diverterListenerCallbacks
+            try:
+                listener.acceptDiverterListenerCallbacks(self.diverterListenerCallbacks)
+            except AttributeError:
+                self.logger.debug("acceptDiverterListenerCallbacks() not implemented by Listener %s" % listener.name)
 
     def stop(self):
 
@@ -323,7 +341,7 @@ class IfaceIpInfo():
 
 def main():
 
-    print """
+    print("""
   ______      _  ________ _   _ ______ _______     _   _  _____
  |  ____/\   | |/ /  ____| \ | |  ____|__   __|   | \ | |/ ____|
  | |__ /  \  | ' /| |__  |  \| | |__     | |______|  \| | |  __
@@ -331,14 +349,15 @@ def main():
  | | / ____ \| . \| |____| |\  | |____   | |      | |\  | |__| |
  |_|/_/    \_\_|\_\______|_| \_|______|  |_|      |_| \_|\_____|
 
-                        Version 1.4.12
+                        Version 3.2
   _____________________________________________________________
                    Developed by FLARE Team
+    Copyright (C) 2016-2024 Mandiant, Inc. All rights reserved.
   _____________________________________________________________
-                                               """
+                                               """)
 
     # Parse command line arguments
-    parser = OptionParser(usage = "fakenet.py [options]:")
+    parser = OptionParser(usage = "python -m fakenet.fakenet [options]:")
     parser.add_option("-c", "--config-file", action="store",  dest="config_file",
                       help="configuration filename", metavar="FILE")
     parser.add_option("-v", "--verbose",
@@ -375,7 +394,7 @@ def main():
             loghandler = logging.StreamHandler(stream=open(options.log_file,
                                                            'a'))
         except IOError:
-            print('Failed to open specified log file: %s' % (options.log_file))
+            print(('Failed to open specified log file: %s' % (options.log_file)))
             sys.exit(1)
         loghandler.formatter = logging.Formatter(
             '%(asctime)s [%(name)18s] %(message)s', datefmt=date_format)
@@ -389,8 +408,8 @@ def main():
         elif platform_name.lower().startswith('linux'):
             sysloghandler = logging.handlers.SysLogHandler('/dev/log')
         else:
-            print('Error: Your system %s is currently not supported.' %
-                  (platform_name))
+            print(('Error: Your system %s is currently not supported.' %
+                  (platform_name)))
             sys.exit(1)
 
         # Specify datefmt for consistency, but syslog generally logs the time
